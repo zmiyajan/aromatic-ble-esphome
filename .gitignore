@@ -11,3 +11,6 @@ guide.html
 apk/
 decompiled/
 decompiled-res/
+
+# Personal photos stay local (see guide.html)
+docs/images/*.jpg

@@ -4,9 +4,9 @@ Control a Bluetooth **Aromatic** scent diffuser from Home Assistant using a
 cheap ESP32 running [ESPHome](https://esphome.io). The ESP32 talks Bluetooth LE
 to the diffuser and WiFi to Home Assistant.
 
-```
-Home Assistant  ⇄  WiFi  ⇄  ESP32-C3 (ESPHome)  ⇄  Bluetooth LE  ⇄  Diffuser
-```
+![Home Assistant and the web page talk to the ESP32-C3 over WiFi; the ESP32 talks to the diffuser over Bluetooth LE and reads an optional light sensor](docs/images/architecture.svg)
+
+**دليل بالعربي مع الصور والرسومات:** [docs/guide-ar.md](docs/guide-ar.md)
 
 > Unofficial project, not affiliated with Aromatic Families Trading Est.
 > The protocol was worked out for interoperability with a device the author owns.
@@ -86,6 +86,10 @@ Wire an LDR and a 10 kΩ resistor to the ESP32-C3 Super Mini:
              └── 10 kΩ ── GND
 ```
 
+![Wiring: 3V3 to one LDR lead; the other LDR lead to GPIO4 and through 10 kΩ to GND](docs/images/wiring.svg)
+
+![The light combo: the diffuser sprays only when a schedule slot is active and the room is lit](docs/images/light-combo.svg)
+
 Turn on **Light control** and set **Light threshold** between your covered and
 lit readings. If you have no sensor, remove the `light:` line under `packages:`
 in `aromatic-bridge.yaml`.
@@ -104,6 +108,8 @@ the light level over BLE, which is why the bridge uses its own LDR.
 | `light.yaml` | Optional LDR light control |
 | `PROTOCOL.md` | The reverse-engineered BLE protocol |
 | `probe-*.yaml` | The step-by-step probes used to work it out |
+| `docs/guide-ar.md` | Full guide in Arabic, with photos and diagrams |
+| `docs/images/` | Diagrams (SVG) |
 
 ## Probes
 
@@ -143,7 +149,7 @@ All of them print to the USB log, so no WiFi is needed:
 جسر يربط معطر **Aromatic** اللي يشتغل بالبلوتوث مع **Home Assistant** عن طريق
 شريحة ESP32 عليها ESPHome. فيه تشغيل وإطفاء، والجداول الخمسة (الأوقات والأيام
 والشدة)، والمروحة، وصفحة ويب على الشريحة نفسها، وحساس نور اختياري يخلي المعطر
-يرش بس إذا الغرفة منوّرة. التفاصيل التقنية في [PROTOCOL.md](PROTOCOL.md).
+يرش بس إذا الغرفة منوّرة. التفاصيل التقنية في [PROTOCOL.md](PROTOCOL.md)، والدليل الكامل بالصور في [docs/guide-ar.md](docs/guide-ar.md).
 
 خطوات التركيب:
 1. انسخ `secrets.yaml.example` باسم `secrets.yaml` وعبّه.
