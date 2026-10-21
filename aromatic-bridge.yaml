@@ -1,21 +1,25 @@
 # Aromatic BLE diffuser → Home Assistant bridge (ESP32-C3).
 #
-# Connects on demand: each action or refresh opens a BLE connection, logs in,
-# reads the state the device pushes after login, optionally writes a command,
-# then disconnects so the phone app can still reach the diffuser.
-# Protocol details: PROTOCOL.md
+# Connects on demand: each change or refresh opens a BLE connection, logs in,
+# reads the state the device pushes after login, writes any queued frames,
+# then disconnects so the phone app can still reach the diffuser. After a
+# write it reconnects once to read the result back from the device.
+# Protocol details: PROTOCOL.md. Shared C++ helpers: aromatic.h.
 substitutions:
   password: !secret aromatic_password
-  refresh_interval: 5min
+  # The diffuser beeps on every BLE session, so keep background refreshes rare.
+  refresh_interval: 60min
 
 esphome:
   name: aromatic-bridge
   friendly_name: Aromatic
+  includes:
+    - aromatic.h
   on_boot:
     priority: -100
     then:
       - delay: 10s
-      - ble_client.connect: aromatic
+      - ble_client.connect: ble_diffuser
 
 esp32:
   board: esp32-c3-devkitm-1
@@ -38,29 +42,98 @@ api:
 ota:
   - platform: esphome
 
+# Limits flash writes from the restored oil counters.
+preferences:
+  flash_write_interval: 10min
+
+web_server:
+  port: 80
+  version: 3
+  local: true
+  auth:
+    username: !secret web_username
+    password: !secret web_password
+  sorting_groups:
+    - { id: grp_main, name: "Diffuser", sorting_weight: 0 }
+    - { id: grp_light, name: "Room light", sorting_weight: 1 }
+    - { id: grp_slot1, name: "Slot 1", sorting_weight: 2 }
+    - { id: grp_slot2, name: "Slot 2", sorting_weight: 3 }
+    - { id: grp_slot3, name: "Slot 3", sorting_weight: 4 }
+    - { id: grp_slot4, name: "Slot 4", sorting_weight: 5 }
+    - { id: grp_slot5, name: "Slot 5", sorting_weight: 6 }
+    - { id: grp_oil, name: "Oil (estimated)", sorting_weight: 7 }
+    - { id: grp_system, name: "System", sorting_weight: 8 }
+
+packages:
+  slot1: !include { file: slot.yaml, vars: { n: 1 } }
+  slot2: !include { file: slot.yaml, vars: { n: 2 } }
+  slot3: !include { file: slot.yaml, vars: { n: 3 } }
+  slot4: !include { file: slot.yaml, vars: { n: 4 } }
+  slot5: !include { file: slot.yaml, vars: { n: 5 } }
+  light: !include light.yaml
+
 time:
   - platform: homeassistant
     id: ha_time
+    on_time:
+      - seconds: 0
+        minutes: 0
+        hours: 0
+        then:
+          - lambda: id(spray_today) = 0;
 
 globals:
-  # Last total-control byte reported by the device (reply 4D):
-  # bit0 on/off, bit1 fan, bit2 demo, bit4 lamp.
-  - id: control_byte
-    type: uint8_t
-    initial_value: "0"
-  # Total-control byte waiting to be written on the next connection, -1 = none.
-  - id: pending
-    type: int
-    initial_value: "-1"
   - id: busy
     type: bool
     initial_value: "false"
+  # Day of year of the last time sync; the clock is synced at most once a day.
+  - id: synced_day
+    type: int
+    initial_value: "-1"
+  # Set after writing frames; triggers one reconnect to read the result back.
+  - id: readback
+    type: bool
+    initial_value: "false"
+  # Estimated seconds of actual spraying (spray part of spray/pause cycles).
+  - id: spray_today
+    type: float
+    restore_value: true
+    initial_value: "0"
+  - id: spray_total
+    type: float
+    restore_value: true
+    initial_value: "0"
+
+script:
+  # Short blue-LED blinks to confirm a BOOT button press.
+  - id: blink
+    mode: restart
+    parameters:
+      times: int
+    then:
+      - repeat:
+          count: !lambda return times;
+          then:
+            - light.turn_on: { id: blue_led, brightness: 40%, transition_length: 0s }
+            - delay: 150ms
+            - light.turn_off: { id: blue_led, transition_length: 0s }
+            - delay: 200ms
+  # Debounces edits, then connects to write the queued frames.
+  - id: flush
+    mode: restart
+    then:
+      - delay: 2s
+      - if:
+          condition:
+            lambda: return !id(busy);
+          then:
+            - ble_client.connect: ble_diffuser
 
 esp32_ble_tracker:
 
 ble_client:
   - mac_address: !secret aromatic_mac
-    id: aromatic
+    id: ble_diffuser
     auto_connect: false
     on_connect:
       then:
@@ -68,7 +141,7 @@ ble_client:
         # Wait for the notification subscription on FFF6.
         - delay: 2s
         - ble_client.ble_write:
-            id: aromatic
+            id: ble_diffuser
             service_uuid: "FFF0"
             characteristic_uuid: "FFF6"
             value: !lambda |-
@@ -80,10 +153,13 @@ ble_client:
         - delay: 1500ms
         - if:
             condition:
-              lambda: return id(ha_time).now().is_valid();
+              lambda: |-
+                auto now = id(ha_time).now();
+                return now.is_valid() && now.day_of_year != id(synced_day);
             then:
+              - lambda: id(synced_day) = id(ha_time).now().day_of_year;
               - ble_client.ble_write:
-                  id: aromatic
+                  id: ble_diffuser
                   service_uuid: "FFF0"
                   characteristic_uuid: "FFF6"
                   value: !lambda |-
@@ -92,101 +168,283 @@ ble_client:
                         (uint8_t) (t.year % 100), t.month, t.day_of_month,
                         t.hour, t.minute, t.second};
               - delay: 300ms
-        - if:
+        - while:
             condition:
-              lambda: return id(pending) >= 0;
+              lambda: return !aromatic::state().queue.empty();
             then:
               - ble_client.ble_write:
-                  id: aromatic
+                  id: ble_diffuser
                   service_uuid: "FFF0"
                   characteristic_uuid: "FFF6"
                   value: !lambda |-
-                    uint8_t b = (uint8_t) id(pending);
-                    id(pending) = -1;
-                    ESP_LOGI("aromatic", "Sending %s (2D %02X)", (b & 0x01) ? "ON" : "OFF", b);
-                    id(control_byte) = b & 0x17;
-                    id(power).publish_state(b & 0x01);
-                    return std::vector<uint8_t>{0x2D, b};
-              - delay: 500ms
-        - ble_client.disconnect: aromatic
+                    auto &q = aromatic::state().queue;
+                    std::vector<uint8_t> f = q.front();
+                    q.erase(q.begin());
+                    if (f[0] == 0x2A && f.size() == aromatic::kSlotLen)
+                      f[3] = aromatic::state().fan_fog;  // fan may have changed after queueing
+                    id(readback) = true;
+                    ESP_LOGI("aromatic", "Writing %s", format_hex_pretty(f).c_str());
+                    return f;
+              - delay: 300ms
+        - delay: 500ms
+        - ble_client.disconnect: ble_diffuser
     on_disconnect:
       then:
         - lambda: id(busy) = false;
-        # A command arrived after this connection's write step: reconnect for it.
         - if:
             condition:
-              lambda: return id(pending) >= 0;
+              # Edits arrived after this connection's write step.
+              lambda: return !aromatic::state().queue.empty();
             then:
               - delay: 1s
-              - ble_client.connect: aromatic
+              - ble_client.connect: ble_diffuser
+            else:
+              - if:
+                  condition:
+                    lambda: return id(readback);
+                  then:
+                    - lambda: id(readback) = false;
+                    - delay: 1s
+                    - ble_client.connect: ble_diffuser
 
 sensor:
   - platform: ble_client
     type: characteristic
     id: fff6_notify
     internal: true
-    ble_client_id: aromatic
+    ble_client_id: ble_diffuser
     service_uuid: "FFF0"
     characteristic_uuid: "FFF6"
     notify: true
     update_interval: never
     lambda: |-
       if (x.empty()) return {};
+      aromatic::state().parse(x);
       if (x[0] == 0x8F) {
         std::string reply(x.begin() + 1, x.end());
-        if (reply.rfind("ERROR", 0) == 0) {
-          ESP_LOGE("aromatic", "Login rejected: wrong password");
-          id(login_ok).publish_state(false);
-        } else {
+        bool ok = reply.rfind("ERROR", 0) != 0;
+        if (ok)
           ESP_LOGI("aromatic", "Logged in (%s)", reply.substr(0, 7).c_str());
-          id(login_ok).publish_state(true);
-        }
-      } else if (x[0] == 0x4D && x.size() >= 2) {
-        id(control_byte) = x[1];
-        id(power).publish_state(x[1] & 0x01);
-        ESP_LOGI("aromatic", "State: %s", (x[1] & 0x01) ? "ON" : "OFF");
+        else
+          ESP_LOGE("aromatic", "Login rejected: wrong password");
+        id(login_ok).publish_state(ok);
+      } else if (x[0] == 0x4D) {
+        ESP_LOGI("aromatic", "State: %s", aromatic::state().power() ? "ON" : "OFF");
+      } else if (x[0] == 0x4C || x[0] == 0x4E) {
+        // Not used by the app; logged to work out what they carry.
+        ESP_LOGD("aromatic", "Reply %02X: %s", x[0], format_hex_pretty(x).c_str());
+      } else if (x[0] == 0x4A && x.size() >= 14 && x[5] >= 1 && x[5] <= aromatic::kSlots) {
+        auto &s = aromatic::state().slots[x[5] - 1];
+        auto g = aromatic::state().timing(s);
+        ESP_LOGI("aromatic", "Slot %u: %s %02u:%02u-%02u:%02u %s, %s %us/%us", x[5],
+                 s.enabled() ? "on " : "off", s.raw[7], s.raw[8], s.raw[9], s.raw[10],
+                 aromatic::days_to_text(s.raw[11]).c_str(), aromatic::level_name(s).c_str(),
+                 g.spray, g.pause);
+        ESP_LOGD("aromatic", "  raw %s", format_hex_pretty(x).c_str());
       }
       return {};
+
+  - platform: template
+    name: "Spray time today"
+    icon: mdi:spray
+    unit_of_measurement: min
+    accuracy_decimals: 1
+    state_class: total_increasing
+    update_interval: 60s
+    web_server: { sorting_group_id: grp_oil }
+    lambda: return id(spray_today) / 60.0f;
+  - platform: template
+    id: oil_used
+    name: "Oil used"
+    icon: mdi:water-minus
+    unit_of_measurement: mL
+    accuracy_decimals: 1
+    state_class: total_increasing
+    update_interval: 60s
+    web_server: { sorting_group_id: grp_oil }
+    lambda: return id(spray_total) / 3600.0f * id(oil_rate).state;
+  - platform: template
+    name: "Oil left"
+    icon: mdi:water-percent
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    update_interval: 60s
+    web_server: { sorting_group_id: grp_oil }
+    lambda: |-
+      float used = id(spray_total) / 3600.0f * id(oil_rate).state;
+      return std::max(0.0f, 100.0f - used / id(bottle_size).state * 100.0f);
 
 switch:
   - platform: template
     id: power
     name: "Diffuser"
     icon: mdi:scent
+    web_server: { sorting_group_id: grp_main, sorting_weight: 0 }
     # Never send a command on boot; the real state is read from the device.
     restore_mode: DISABLED
+    lambda: |-
+      if (!aromatic::state().control_valid) return {};
+      return aromatic::state().power();
     turn_on_action:
-      - lambda: id(pending) = 0x08 | (id(control_byte) & 0x16) | 0x01;
-      - if:
-          condition:
-            lambda: return !id(busy);
-          then:
-            - ble_client.connect: aromatic
+      - lambda: aromatic::state().set_power(true);
+      - script.execute: flush
     turn_off_action:
-      - lambda: id(pending) = 0x08 | (id(control_byte) & 0x16);
-      - if:
-          condition:
-            lambda: return !id(busy);
-          then:
-            - ble_client.connect: aromatic
+      - lambda: aromatic::state().set_power(false);
+      - script.execute: flush
+
+number:
+  - platform: template
+    name: "Fan level"
+    icon: mdi:fan
+    web_server: { sorting_group_id: grp_main, sorting_weight: 2 }
+    min_value: 0
+    max_value: 4
+    step: 1
+    update_interval: 1s
+    lambda: |-
+      if (!aromatic::state().control_valid) return {};
+      return (float) aromatic::state().fan_level();
+    set_action:
+      - lambda: aromatic::state().set_fan_level((uint8_t) x);
+      - script.execute: flush
+  - platform: template
+    id: oil_rate
+    name: "Oil per spray hour"
+    icon: mdi:water
+    entity_category: config
+    unit_of_measurement: mL
+    mode: box
+    min_value: 1
+    max_value: 200
+    step: 0.5
+    optimistic: true
+    restore_value: true
+    initial_value: 20
+    web_server: { sorting_group_id: grp_oil }
+    on_value:
+      - lambda: global_preferences->sync();
+  - platform: template
+    id: bottle_size
+    name: "Bottle size"
+    icon: mdi:bottle-tonic
+    entity_category: config
+    unit_of_measurement: mL
+    mode: box
+    min_value: 10
+    max_value: 1000
+    step: 10
+    optimistic: true
+    restore_value: true
+    initial_value: 100
+    web_server: { sorting_group_id: grp_oil }
+    on_value:
+      - lambda: global_preferences->sync();
+
+text_sensor:
+  - platform: template
+    name: "Status"
+    icon: mdi:information-outline
+    update_interval: 10s
+    web_server: { sorting_group_id: grp_main, sorting_weight: 1 }
+    lambda: |-
+      auto &st = aromatic::state();
+      if (!st.control_valid) return std::string("Unknown");
+      if (!st.power()) {
+        bool dark = id(light_control).state && id(room_lit).has_state() && !id(room_lit).state;
+        return std::string(dark ? "Off · dark" : "Off");
+      }
+      auto now = id(ha_time).now();
+      if (!now.is_valid()) return std::string("On");
+      int dow = now.day_of_week - 1, minute = now.hour * 60 + now.minute;
+      char buf[48];
+      int a = st.active_slot(dow, minute);
+      if (a >= 0) {
+        auto g = st.timing(st.slots[a]);
+        snprintf(buf, sizeof(buf), "Active · slot %d · %us/%us", a + 1, g.spray, g.pause);
+        return std::string(buf);
+      }
+      int n = st.next_slot(dow, minute);
+      if (n < 0) return std::string("Idle · done for today");
+      snprintf(buf, sizeof(buf), "Idle · next %02u:%02u", st.slots[n].raw[7], st.slots[n].raw[8]);
+      return std::string(buf);
+
+# Blue on-board LED (GPIO8, active low) — off by default so it doesn't light
+# the room at night. The red power LED is hard-wired and can only be covered.
+output:
+  - platform: ledc
+    id: blue_led_out
+    pin:
+      number: GPIO8
+      inverted: true
+      ignore_strapping_warning: true
+
+light:
+  - platform: monochromatic
+    id: blue_led
+    name: "Bridge LED"
+    icon: mdi:led-on
+    output: blue_led_out
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: config
+    web_server: { sorting_group_id: grp_system }
 
 binary_sensor:
+  # BOOT button: short press toggles the diffuser, 2 s press toggles light
+  # control. The blue LED blinks once or twice to confirm. (Holding BOOT while
+  # powering up still enters the bootloader as usual.)
+  - platform: gpio
+    id: boot_button
+    name: "Boot button"
+    internal: true
+    pin:
+      number: GPIO9
+      inverted: true
+      mode: { input: true, pullup: true }
+      ignore_strapping_warning: true
+    filters:
+      - delayed_on_off: 30ms
+    on_multi_click:
+      - timing:
+          - ON for at most 1s
+          - OFF for at least 0.3s
+        then:
+          - switch.toggle: power
+          - script.execute: { id: blink, times: 1 }
+      - timing:
+          - ON for at least 2s
+        then:
+          - switch.toggle: light_control
+          - script.execute: { id: blink, times: 2 }
   - platform: template
     id: login_ok
     name: "Diffuser login"
     device_class: connectivity
     entity_category: diagnostic
+    web_server: { sorting_group_id: grp_system }
 
 button:
   - platform: template
     name: "Refresh diffuser state"
     entity_category: diagnostic
+    web_server: { sorting_group_id: grp_system }
     on_press:
       - if:
           condition:
             lambda: return !id(busy);
           then:
-            - ble_client.connect: aromatic
+            - ble_client.connect: ble_diffuser
+  - platform: restart
+    name: "Restart bridge"
+    entity_category: config
+    web_server: { sorting_group_id: grp_system }
+  - platform: template
+    name: "Bottle refilled"
+    icon: mdi:bottle-tonic-plus
+    web_server: { sorting_group_id: grp_oil }
+    on_press:
+      - lambda: |-
+          id(spray_total) = 0;
+          global_preferences->sync();
 
 interval:
   - interval: ${refresh_interval}
@@ -195,4 +453,18 @@ interval:
           condition:
             lambda: return !id(busy);
           then:
-            - ble_client.connect: aromatic
+            - ble_client.connect: ble_diffuser
+  # Oil estimate: add the spray share of each minute spent inside an active slot.
+  - interval: 60s
+    then:
+      - lambda: |-
+          auto now = id(ha_time).now();
+          auto &st = aromatic::state();
+          if (!now.is_valid() || !st.control_valid || !st.power()) return;
+          int a = st.active_slot(now.day_of_week - 1, now.hour * 60 + now.minute);
+          if (a < 0) return;
+          auto g = st.timing(st.slots[a]);
+          if (g.spray + g.pause == 0) return;
+          float seconds = 60.0f * g.spray / (g.spray + g.pause);
+          id(spray_today) += seconds;
+          id(spray_total) += seconds;

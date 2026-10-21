@@ -39,10 +39,10 @@ replies arrive as notifications on `FFF6` and start with a reply code.
 
 | Purpose | Frame |
 |---|---|
-| Master on/off per aroma | `2A <aroma=1> 02 <bits: fan(3) fog(1)> 00` — fog bit = on |
+| Fan level / fog per aroma | `2A <aroma=1> 02 <fan level << 1 \| fog> 00` — fan 0–4. ✅ `2A 01 02 03 00` = fan 1, read back in byte 3 of `4A` |
 | Total control | `2D <bits: lamp 1 demo fan onOff>` — LSB = on/off. ✅ `2D 08` off, `2D 09` on (no reply; re-login shows `4D 00` / `4D 01`). Writes all five bits, so keep lamp/demo/fan from the last `4D`. |
 | Lamp | `31 <ui> 00 <state>` |
-| Schedule slot | `2A aroma 02 bits 00 index flags(fan,timeOnOff,show) hOn mOn hOff mOff repeat(7 bits) customGrade grade [work_hi work_lo stop_hi stop_lo]` |
+| Schedule slot | `2A aroma 02 bits 00 index flags(fan,timeOnOff,show) hOn mOn hOff mOff days customGrade grade [work_hi work_lo stop_hi stop_lo]` — same layout as reply `4A`. ✅ times, days, level, custom times and enable bit all verified by readback and after a bridge reboot. Days: bit0 = Sunday … bit6 = Saturday. |
 | Rename | `22` + UTF-8 name |
 
 ## Commands (v2.0)
@@ -81,6 +81,27 @@ In "reply" mode the app acknowledges each reply with `code | 0x80` (e.g. `4D` �
 41 03 1A 0A 15 14 01 15                            device clock: Wed 26-10-21 20:01:21
 ```
 
+## Device modes and buttons ✅
+
+The panel has a mode button: 6h, 12h, 24h, **Smart** (built-in light sensor:
+sprays only when lit) and **Bluetooth** (runs the stored schedules).
+
+- Any BLE session switches the diffuser back to Bluetooth mode, and the mode
+  button is ignored while connected. Smart mode and BLE control don't mix.
+- Pressing the panel's mode or intensity buttons rewrites the schedule slots
+  (e.g. Smart set slot 1 to 00:00–23:59 at Level 3).
+- The light level is not reported over BLE: `4C` and the advertisement
+  (`00 00 32`) stayed constant while the sensor was covered.
+- The diffuser accepted a custom spray of 10 s (reported minimum 15 s).
+
+## Other replies
+
+| Code | Observed | Guess |
+|---|---|---|
+| `4C` | `4C 00 00 32` (constant) | unknown; same bytes as the advertised manufacturer data |
+| `4E` | `4E 00 08 <u16>`, e.g. `0E 07` → `10 E5` | the u16 stays flat outside schedule windows and during pauses, rises while spraying: likely cumulative spray seconds |
+
 ## Not yet known
 - Whether master-off survives the next schedule window.
-- Writing intensity / schedules from ESPHome (frames above, untested).
+- Byte 4 of the slot frame (seen as `00` and `01`).
+- Whether the pump honours custom spray times below 15 s exactly.

@@ -1,0 +1,99 @@
+# Optional room-light sensor: an LDR wired to the ESP32 so the diffuser only
+# runs while the room is lit. Remove this package if you have no sensor.
+#
+#   3V3 ── LDR ──┬── GPIO4
+#                └── 10 kΩ ── GND
+#
+# More light → lower LDR resistance → higher voltage on GPIO4.
+sensor:
+  - platform: adc
+    id: room_light
+    name: "Room light"
+    icon: mdi:brightness-6
+    pin: GPIO4
+    attenuation: 12db
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    update_interval: 500ms
+    web_server:
+      sorting_group_id: grp_light
+      sorting_weight: 2
+    filters:
+      - multiply: 30.3  # 3.3 V → 100 %
+      - sliding_window_moving_average:
+          window_size: 4
+          send_every: 2
+      - or:
+          - delta: 2
+          - throttle: 60s
+
+binary_sensor:
+  - platform: template
+    id: room_lit
+    name: "Room lit"
+    device_class: light
+    web_server:
+      sorting_group_id: grp_light
+      sorting_weight: 1
+    lambda: |-
+      // Hysteresis of 3 % around the threshold so flicker doesn't toggle it.
+      float level = id(room_light).state, t = id(light_threshold).state;
+      if (std::isnan(level)) return {};
+      if (level > t + 3) return true;
+      if (level < t - 3) return false;
+      return id(room_lit).state;
+    filters:
+      # Ignore a hand passing over the sensor or a light switched off briefly.
+      - delayed_on: 3s
+      - delayed_off: 5s
+    on_state:
+      - if:
+          condition:
+            switch.is_on: light_control
+          then:
+            - lambda: |-
+                ESP_LOGI("aromatic", "Room %s: diffuser %s", x ? "lit" : "dark", x ? "ON" : "OFF");
+                aromatic::state().set_power(x);
+            - script.execute: flush
+
+switch:
+  - platform: template
+    id: light_control
+    name: "Light control"
+    icon: mdi:lightbulb-auto
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    web_server:
+      sorting_group_id: grp_light
+      sorting_weight: 0
+    # Settings are saved right away instead of waiting for flash_write_interval.
+    on_turn_on:
+      - lambda: global_preferences->sync();
+    on_turn_off:
+      - lambda: global_preferences->sync();
+    # Apply the current light state as soon as light control is switched on.
+    turn_on_action:
+      - if:
+          condition:
+            lambda: return id(room_lit).has_state();
+          then:
+            - lambda: aromatic::state().set_power(id(room_lit).state);
+            - script.execute: flush
+
+number:
+  - platform: template
+    id: light_threshold
+    name: "Light threshold"
+    icon: mdi:brightness-percent
+    unit_of_measurement: "%"
+    min_value: 5
+    max_value: 95
+    step: 1
+    optimistic: true
+    restore_value: true
+    initial_value: 30
+    web_server:
+      sorting_group_id: grp_light
+      sorting_weight: 3
+    on_value:
+      - lambda: global_preferences->sync();

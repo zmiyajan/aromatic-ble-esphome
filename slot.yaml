@@ -1,0 +1,147 @@
+# One device schedule slot. Included five times from aromatic-bridge.yaml with
+# vars: n = slot number (1-5). Each change is queued and written on the next
+# BLE connection, then read back from the device.
+switch:
+  - platform: template
+    id: slot${n}_enabled
+    name: "Slot ${n}"
+    web_server:
+      sorting_group_id: grp_slot${n}
+      sorting_weight: 0
+    icon: mdi:calendar-clock
+    restore_mode: DISABLED
+    lambda: |-
+      auto &s = aromatic::state().slots[${n} - 1];
+      if (!s.valid) return {};
+      return s.enabled();
+    turn_on_action:
+      - lambda: aromatic::state().set_enabled(${n} - 1, true);
+      - script.execute: flush
+    turn_off_action:
+      - lambda: aromatic::state().set_enabled(${n} - 1, false);
+      - script.execute: flush
+
+datetime:
+  - platform: template
+    type: time
+    id: slot${n}_start
+    name: "Slot ${n} start"
+    web_server:
+      sorting_group_id: grp_slot${n}
+      sorting_weight: 1
+    update_interval: 1s
+    lambda: |-
+      auto &s = aromatic::state().slots[${n} - 1];
+      if (!s.valid) return {};
+      ESPTime t{};
+      t.hour = s.raw[7];
+      t.minute = s.raw[8];
+      return t;
+    set_action:
+      - lambda: aromatic::state().set_start(${n} - 1, x.hour, x.minute);
+      - script.execute: flush
+  - platform: template
+    type: time
+    id: slot${n}_end
+    name: "Slot ${n} end"
+    web_server:
+      sorting_group_id: grp_slot${n}
+      sorting_weight: 2
+    update_interval: 1s
+    lambda: |-
+      auto &s = aromatic::state().slots[${n} - 1];
+      if (!s.valid) return {};
+      ESPTime t{};
+      t.hour = s.raw[9];
+      t.minute = s.raw[10];
+      return t;
+    set_action:
+      - lambda: aromatic::state().set_end(${n} - 1, x.hour, x.minute);
+      - script.execute: flush
+
+text:
+  - platform: template
+    id: slot${n}_days
+    name: "Slot ${n} days"
+    web_server:
+      sorting_group_id: grp_slot${n}
+      sorting_weight: 3
+    icon: mdi:calendar-week
+    mode: text
+    update_interval: 1s
+    lambda: |-
+      auto &s = aromatic::state().slots[${n} - 1];
+      if (!s.valid) return {};
+      return aromatic::days_to_text(s.raw[11]);
+    set_action:
+      - lambda: |-
+          auto mask = aromatic::text_to_days(x);
+          if (!mask.has_value()) {
+            ESP_LOGW("aromatic", "Slot ${n}: unknown days '%s' (use e.g. Sun,Mon,Tue or Every day)", x.c_str());
+            return;
+          }
+          aromatic::state().set_days(${n} - 1, *mask);
+          id(flush).execute();
+
+select:
+  - platform: template
+    id: slot${n}_intensity
+    name: "Slot ${n} intensity"
+    web_server:
+      sorting_group_id: grp_slot${n}
+      sorting_weight: 4
+    icon: mdi:gauge
+    options: ["Level 1", "Level 2", "Level 3", "Level 4", "Custom"]
+    update_interval: 1s
+    lambda: |-
+      auto &s = aromatic::state().slots[${n} - 1];
+      if (!s.valid) return {};
+      return aromatic::level_name(s);
+    set_action:
+      - lambda: |-
+          std::string v = x;
+          uint8_t level = v == "Custom" ? 0 : v.back() - '0';
+          aromatic::state().set_level(${n} - 1, level);
+      - script.execute: flush
+
+number:
+  - platform: template
+    id: slot${n}_spray
+    name: "Slot ${n} custom spray"
+    web_server:
+      sorting_group_id: grp_slot${n}
+      sorting_weight: 5
+    icon: mdi:spray
+    unit_of_measurement: s
+    mode: box
+    min_value: 5  # device reports 15 s minimum; lower values are tested by readback
+    max_value: 300
+    step: 1
+    update_interval: 1s
+    lambda: |-
+      auto &s = aromatic::state().slots[${n} - 1];
+      if (!s.valid) return {};
+      return (float) s.custom_spray();
+    set_action:
+      - lambda: aromatic::state().set_custom_spray(${n} - 1, (uint16_t) x);
+      - script.execute: flush
+  - platform: template
+    id: slot${n}_pause
+    name: "Slot ${n} custom pause"
+    web_server:
+      sorting_group_id: grp_slot${n}
+      sorting_weight: 6
+    icon: mdi:timer-pause
+    unit_of_measurement: s
+    mode: box
+    min_value: 15
+    max_value: 600
+    step: 1
+    update_interval: 1s
+    lambda: |-
+      auto &s = aromatic::state().slots[${n} - 1];
+      if (!s.valid) return {};
+      return (float) s.custom_pause();
+    set_action:
+      - lambda: aromatic::state().set_custom_pause(${n} - 1, (uint16_t) x);
+      - script.execute: flush
