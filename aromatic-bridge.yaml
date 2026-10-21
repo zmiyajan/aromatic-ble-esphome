@@ -1,0 +1,198 @@
+# Aromatic BLE diffuser → Home Assistant bridge (ESP32-C3).
+#
+# Connects on demand: each action or refresh opens a BLE connection, logs in,
+# reads the state the device pushes after login, optionally writes a command,
+# then disconnects so the phone app can still reach the diffuser.
+# Protocol details: PROTOCOL.md
+substitutions:
+  password: !secret aromatic_password
+  refresh_interval: 5min
+
+esphome:
+  name: aromatic-bridge
+  friendly_name: Aromatic
+  on_boot:
+    priority: -100
+    then:
+      - delay: 10s
+      - ble_client.connect: aromatic
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+logger:
+  level: INFO
+  hardware_uart: USB_SERIAL_JTAG
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  output_power: 8.5dB  # some C3 Super Mini boards drop WiFi at full power
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+
+time:
+  - platform: homeassistant
+    id: ha_time
+
+globals:
+  # Last total-control byte reported by the device (reply 4D):
+  # bit0 on/off, bit1 fan, bit2 demo, bit4 lamp.
+  - id: control_byte
+    type: uint8_t
+    initial_value: "0"
+  # Total-control byte waiting to be written on the next connection, -1 = none.
+  - id: pending
+    type: int
+    initial_value: "-1"
+  - id: busy
+    type: bool
+    initial_value: "false"
+
+esp32_ble_tracker:
+
+ble_client:
+  - mac_address: !secret aromatic_mac
+    id: aromatic
+    auto_connect: false
+    on_connect:
+      then:
+        - lambda: id(busy) = true;
+        # Wait for the notification subscription on FFF6.
+        - delay: 2s
+        - ble_client.ble_write:
+            id: aromatic
+            service_uuid: "FFF0"
+            characteristic_uuid: "FFF6"
+            value: !lambda |-
+              std::string pw = "${password}AA01";
+              std::vector<uint8_t> v{0x8F};
+              v.insert(v.end(), pw.begin(), pw.end());
+              return v;
+        # The device pushes its full state right after login.
+        - delay: 1500ms
+        - if:
+            condition:
+              lambda: return id(ha_time).now().is_valid();
+            then:
+              - ble_client.ble_write:
+                  id: aromatic
+                  service_uuid: "FFF0"
+                  characteristic_uuid: "FFF6"
+                  value: !lambda |-
+                    auto t = id(ha_time).now();
+                    return std::vector<uint8_t>{0x21, (uint8_t) (t.day_of_week - 1),
+                        (uint8_t) (t.year % 100), t.month, t.day_of_month,
+                        t.hour, t.minute, t.second};
+              - delay: 300ms
+        - if:
+            condition:
+              lambda: return id(pending) >= 0;
+            then:
+              - ble_client.ble_write:
+                  id: aromatic
+                  service_uuid: "FFF0"
+                  characteristic_uuid: "FFF6"
+                  value: !lambda |-
+                    uint8_t b = (uint8_t) id(pending);
+                    id(pending) = -1;
+                    ESP_LOGI("aromatic", "Sending %s (2D %02X)", (b & 0x01) ? "ON" : "OFF", b);
+                    id(control_byte) = b & 0x17;
+                    id(power).publish_state(b & 0x01);
+                    return std::vector<uint8_t>{0x2D, b};
+              - delay: 500ms
+        - ble_client.disconnect: aromatic
+    on_disconnect:
+      then:
+        - lambda: id(busy) = false;
+        # A command arrived after this connection's write step: reconnect for it.
+        - if:
+            condition:
+              lambda: return id(pending) >= 0;
+            then:
+              - delay: 1s
+              - ble_client.connect: aromatic
+
+sensor:
+  - platform: ble_client
+    type: characteristic
+    id: fff6_notify
+    internal: true
+    ble_client_id: aromatic
+    service_uuid: "FFF0"
+    characteristic_uuid: "FFF6"
+    notify: true
+    update_interval: never
+    lambda: |-
+      if (x.empty()) return {};
+      if (x[0] == 0x8F) {
+        std::string reply(x.begin() + 1, x.end());
+        if (reply.rfind("ERROR", 0) == 0) {
+          ESP_LOGE("aromatic", "Login rejected: wrong password");
+          id(login_ok).publish_state(false);
+        } else {
+          ESP_LOGI("aromatic", "Logged in (%s)", reply.substr(0, 7).c_str());
+          id(login_ok).publish_state(true);
+        }
+      } else if (x[0] == 0x4D && x.size() >= 2) {
+        id(control_byte) = x[1];
+        id(power).publish_state(x[1] & 0x01);
+        ESP_LOGI("aromatic", "State: %s", (x[1] & 0x01) ? "ON" : "OFF");
+      }
+      return {};
+
+switch:
+  - platform: template
+    id: power
+    name: "Diffuser"
+    icon: mdi:scent
+    # Never send a command on boot; the real state is read from the device.
+    restore_mode: DISABLED
+    turn_on_action:
+      - lambda: id(pending) = 0x08 | (id(control_byte) & 0x16) | 0x01;
+      - if:
+          condition:
+            lambda: return !id(busy);
+          then:
+            - ble_client.connect: aromatic
+    turn_off_action:
+      - lambda: id(pending) = 0x08 | (id(control_byte) & 0x16);
+      - if:
+          condition:
+            lambda: return !id(busy);
+          then:
+            - ble_client.connect: aromatic
+
+binary_sensor:
+  - platform: template
+    id: login_ok
+    name: "Diffuser login"
+    device_class: connectivity
+    entity_category: diagnostic
+
+button:
+  - platform: template
+    name: "Refresh diffuser state"
+    entity_category: diagnostic
+    on_press:
+      - if:
+          condition:
+            lambda: return !id(busy);
+          then:
+            - ble_client.connect: aromatic
+
+interval:
+  - interval: ${refresh_interval}
+    then:
+      - if:
+          condition:
+            lambda: return !id(busy);
+          then:
+            - ble_client.connect: aromatic

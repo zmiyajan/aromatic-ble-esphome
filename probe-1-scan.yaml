@@ -1,0 +1,34 @@
+# Step 1: scan for nearby BLE devices and print them over USB.
+# No WiFi needed — read the output with: esphome logs probe-1-scan.yaml
+esphome:
+  name: aromatic-probe
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+  hardware_uart: USB_SERIAL_JTAG
+  logs:
+    esp32_ble_tracker: INFO
+
+esp32_ble_tracker:
+  scan_parameters:
+    active: true
+    interval: 320ms
+    window: 300ms
+  on_ble_advertise:
+    - then:
+        - lambda: |-
+            char buf[ble_device_base::UUID_STR_LEN];
+            std::string uuids;
+            for (auto &u : x.get_service_uuids()) { uuids += u.to_str(buf); uuids += " "; }
+            ESP_LOGI("scan", "%s  rssi=%d  name='%s'  services=[%s]",
+                     x.address_str().c_str(), x.get_rssi(),
+                     x.get_name().c_str(), uuids.c_str());
+            for (auto &m : x.get_manufacturer_datas()) {
+              ESP_LOGI("scan", "    mfr=%s data=%s", m.uuid.to_str(buf),
+                       format_hex_pretty(m.data).c_str());
+            }

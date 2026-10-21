@@ -1,0 +1,9 @@
+# Secrets and build output
+secrets.yaml
+.esphome/
+*.log
+
+# Third-party app and decompiled code: analysis only, never published
+apk/
+decompiled/
+decompiled-res/

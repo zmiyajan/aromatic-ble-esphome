@@ -1,0 +1,75 @@
+# Step 4: log in and record replies. No control commands are sent.
+esphome:
+  name: aromatic-probe
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+  hardware_uart: USB_SERIAL_JTAG
+  logs:
+    esp32_ble_tracker: INFO
+    ble_sensor: INFO
+    sensor: INFO
+
+globals:
+  - id: got_reply
+    type: bool
+    initial_value: "false"
+
+esp32_ble_tracker:
+
+ble_client:
+  - mac_address: !secret aromatic_mac
+    id: aromatic
+    on_connect:
+      then:
+        - lambda: id(got_reply) = false;
+        - delay: 2s
+        - logger.log: ">>> login 8F + password"
+        - ble_client.ble_write:
+            id: aromatic
+            service_uuid: "FFF0"
+            characteristic_uuid: "FFF6"
+            value: !lambda |-
+              std::string pw = "${password}";
+              std::vector<uint8_t> v{0x8F};
+              v.insert(v.end(), pw.begin(), pw.end());
+              return v;
+        - delay: 1s
+        - if:
+            condition:
+              lambda: return !id(got_reply);
+            then:
+              - logger.log: ">>> no reply, login 8F + password + AA01"
+              - ble_client.ble_write:
+                  id: aromatic
+                  service_uuid: "FFF0"
+                  characteristic_uuid: "FFF6"
+                  value: !lambda |-
+                    std::string pw = "${password}AA01";
+                    std::vector<uint8_t> v{0x8F};
+                    v.insert(v.end(), pw.begin(), pw.end());
+                    return v;
+
+substitutions:
+  password: !secret aromatic_password
+
+sensor:
+  - platform: ble_client
+    type: characteristic
+    ble_client_id: aromatic
+    id: fff6_notify
+    service_uuid: "FFF0"
+    characteristic_uuid: "FFF6"
+    notify: true
+    update_interval: never
+    lambda: |-
+      id(got_reply) = true;
+      std::string ascii;
+      for (auto c : x) ascii += (c >= 32 && c < 127) ? (char) c : '.';
+      ESP_LOGI("rx", "<<< %s  |%s|", format_hex_pretty(x).c_str(), ascii.c_str());
+      return (float) x.size();

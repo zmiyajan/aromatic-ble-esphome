@@ -1,0 +1,30 @@
+# Step 2: connect to the freshener and list its GATT services/characteristics.
+# Read-only: nothing is written to the device.
+esphome:
+  name: aromatic-probe
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+logger:
+  level: VERY_VERBOSE
+  hardware_uart: USB_SERIAL_JTAG
+  logs:
+    esp32_ble_tracker: INFO
+    esp32_ble: DEBUG
+    scheduler: INFO
+    component: INFO
+
+esp32_ble_tracker:
+
+ble_client:
+  - mac_address: !secret aromatic_mac
+    id: aromatic
+    on_connect:
+      then:
+        - logger.log: "Connected to AROMATIC"
+    on_disconnect:
+      then:
+        - logger.log: "Disconnected from AROMATIC"

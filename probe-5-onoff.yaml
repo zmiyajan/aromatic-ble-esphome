@@ -1,0 +1,79 @@
+# Step 5: verify master on/off across fresh connections.
+# conn 1: read state, send OFF (2D 08); conn 2: read state, send ON (2D 09); conn 3: read state.
+esphome:
+  name: aromatic-probe
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+  hardware_uart: USB_SERIAL_JTAG
+  logs:
+    esp32_ble_tracker: INFO
+    ble_sensor: INFO
+    sensor: INFO
+    component: ERROR
+
+substitutions:
+  password: !secret aromatic_password
+
+globals:
+  - id: step
+    type: int
+    initial_value: "0"
+
+esp32_ble_tracker:
+
+ble_client:
+  - mac_address: !secret aromatic_mac
+    id: aromatic
+    on_connect:
+      then:
+        - delay: 2s
+        - lambda: 'ESP_LOGI("test", ">>> connection %d - login", id(step) + 1);'
+        - ble_client.ble_write:
+            id: aromatic
+            service_uuid: "FFF0"
+            characteristic_uuid: "FFF6"
+            value: !lambda |-
+              std::string pw = "${password}AA01";
+              std::vector<uint8_t> v{0x8F};
+              v.insert(v.end(), pw.begin(), pw.end());
+              return v;
+        - delay: 3s
+        - if:
+            condition: { lambda: "return id(step) == 0;" }
+            then:
+              - logger.log: ">>> master OFF 2D 08"
+              - ble_client.ble_write: { id: aromatic, service_uuid: "FFF0", characteristic_uuid: "FFF6", value: [0x2D, 0x08] }
+        - if:
+            condition: { lambda: "return id(step) == 1;" }
+            then:
+              - logger.log: ">>> master ON 2D 09"
+              - ble_client.ble_write: { id: aromatic, service_uuid: "FFF0", characteristic_uuid: "FFF6", value: [0x2D, 0x09] }
+        - if:
+            condition: { lambda: "return id(step) < 2;" }
+            then:
+              - lambda: id(step) += 1;
+              - delay: 1s
+              - logger.log: ">>> disconnecting"
+              - ble_client.disconnect: aromatic
+              - delay: 2s
+              - ble_client.connect: aromatic
+
+sensor:
+  - platform: ble_client
+    type: characteristic
+    id: fff6_notify
+    ble_client_id: aromatic
+    service_uuid: "FFF0"
+    characteristic_uuid: "FFF6"
+    notify: true
+    update_interval: never
+    lambda: |-
+      if (!x.empty() && (x[0] == 0x4D || x[0] == 0x8F))
+        ESP_LOGI("rx", "<<< %s", format_hex_pretty(x).c_str());
+      return (float) x.size();

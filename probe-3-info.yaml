@@ -1,0 +1,43 @@
+# Step 3: read-only — device info, battery, and probe FFF0 characteristics.
+esphome:
+  name: aromatic-probe
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+logger:
+  level: VERBOSE
+  hardware_uart: USB_SERIAL_JTAG
+  logs:
+    esp32_ble_tracker: INFO
+    ble_device_base: INFO
+    scheduler: INFO
+    component: INFO
+
+esp32_ble_tracker:
+
+ble_client:
+  - mac_address: !secret aromatic_mac
+    id: aromatic
+
+text_sensor:
+  - { platform: ble_client, ble_client_id: aromatic, name: manufacturer, service_uuid: "180A", characteristic_uuid: "2A29" }
+  - { platform: ble_client, ble_client_id: aromatic, name: model,        service_uuid: "180A", characteristic_uuid: "2A24" }
+  - { platform: ble_client, ble_client_id: aromatic, name: firmware,     service_uuid: "180A", characteristic_uuid: "2A26" }
+  - { platform: ble_client, ble_client_id: aromatic, name: hardware,     service_uuid: "180A", characteristic_uuid: "2A27" }
+  - { platform: ble_client, ble_client_id: aromatic, name: software,     service_uuid: "180A", characteristic_uuid: "2A28" }
+  - { platform: ble_client, ble_client_id: aromatic, name: fff1,         service_uuid: "FFF0", characteristic_uuid: "FFF1" }
+  - { platform: ble_client, ble_client_id: aromatic, name: fff2,         service_uuid: "FFF0", characteristic_uuid: "FFF2" }
+  - { platform: ble_client, ble_client_id: aromatic, name: fff3,         service_uuid: "FFF0", characteristic_uuid: "FFF3" }
+  - { platform: ble_client, ble_client_id: aromatic, name: fff4,         service_uuid: "FFF0", characteristic_uuid: "FFF4" }
+  - { platform: ble_client, ble_client_id: aromatic, name: fff6,         service_uuid: "FFF0", characteristic_uuid: "FFF6" }
+
+sensor:
+  - platform: ble_client
+    type: characteristic
+    ble_client_id: aromatic
+    name: battery
+    service_uuid: "180F"
+    characteristic_uuid: "2A19"
